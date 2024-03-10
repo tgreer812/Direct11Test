@@ -1,361 +1,322 @@
-// Direct11Test.cpp : Defines the entry point for the application.
-//
-
 #include "pch.h"
-#include "framework.h"
-#include "Direct11Test.h"
-
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
-
+#include <windows.h>
 #include <d3d11.h>
-#include <dxgi1_6.h>
-#include <DirectXMath.h>
-
-#define DEBUGSTRING
 #include "Logging.h"
+#include "TriangularPyramid.h"
+#include <vector>
 
-#define MAX_LOADSTRING 100
+#pragma comment (lib, "d3d11.lib")
 
-// Global Variables:
-HINSTANCE hInst;                                // current instance
-WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
-WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
-
-// Forward declarations of functions included in this code module:
-ATOM                MyRegisterClass(HINSTANCE hInstance);
-BOOL                InitInstance(HINSTANCE, int);
-LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
-INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
-
-#include <dxgi1_6.h> // Include the appropriate DXGI header
-#include <iostream>
-
-IDXGIAdapter* findGraphicsAdapter() {
-    IDXGIFactory* dxgiFactory = nullptr;
-    HRESULT hr = CreateDXGIFactory(__uuidof(IDXGIFactory), (void**)&dxgiFactory);
-
-    LOGDEBUGW(L"Enumerating graphics adapters!!");
-
-    if (FAILED(hr)) {
-        LOGERRORW(L"Error creating DXGI factory.");
-        return nullptr;
-    }
-
-    IDXGIAdapter* foundAdapter = nullptr; // Store the RTX adapter
-    UINT adapterIndex = 0;
-    IDXGIAdapter* adapter = nullptr;
-
-    while (dxgiFactory->EnumAdapters(adapterIndex, &adapter) != DXGI_ERROR_NOT_FOUND) {
-        DXGI_ADAPTER_DESC desc;
-        adapter->GetDesc(&desc);
-
-        // Print adapter information
-        LOGDEBUGW(L"Adapter " + std::to_wstring(adapterIndex) + L": " + desc.Description);
-
-        // Check if the adapter has "RTX" in its name
-        if (std::wstring(desc.Description).find(L"RTX") != std::string::npos) {
-            foundAdapter = adapter;  // Store the found RTX adapter, don't release yet
-        }
-
-        adapter->Release();
-        adapterIndex++;
-    }
-
-    dxgiFactory->Release();
-    return foundAdapter; // Return the RTX adapter (could be nullptr if not found)
-}
+#include <d3dcompiler.h>
+#pragma comment(lib, "d3dcompiler.lib")
 
 
-int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
-                     _In_opt_ HINSTANCE hPrevInstance,
-                     _In_ LPWSTR    lpCmdLine,
-                     _In_ int       nCmdShow)
+// Global Declarations - Others
+IDXGISwapChain* swapchain;             // the pointer to the swap chain interface
+ID3D11Device* dev;                     // the pointer to our Direct3D device interface
+ID3D11DeviceContext* devcon;           // the pointer to our Direct3D device context
+ID3D11RenderTargetView* backbuffer;    // the pointer to our back buffer
+
+// Function Prototypes
+void InitD3D(HWND hWnd);    // sets up and initializes Direct3D
+void CleanD3D(void);        // closes Direct3D and releases memory
+void RenderFrame(void);     // renders a single frame
+
+// the WindowProc function prototype
+LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+void CompileShaders();
+
+// the entry point for any Windows program
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow)
 {
-    UNREFERENCED_PARAMETER(hPrevInstance);
-    UNREFERENCED_PARAMETER(lpCmdLine);
+    HWND hWnd;
+    WNDCLASSEX wc;
 
-    // Initialize global strings
-    LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
-    LoadStringW(hInstance, IDC_DIRECT11TEST, szWindowClass, MAX_LOADSTRING);
-    MyRegisterClass(hInstance);
+    ZeroMemory(&wc, sizeof(WNDCLASSEX));
 
-    // Perform application initialization:
-    if (!InitInstance (hInstance, nCmdShow))
-    {
-        return FALSE;
-    }
+    wc.cbSize = sizeof(WNDCLASSEX);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = WindowProc;
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.lpszClassName = L"WindowClass";
 
-    HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_DIRECT11TEST));
+    RegisterClassEx(&wc);
+
+    hWnd = CreateWindowEx(0,
+        L"WindowClass",
+        L"Our First Direct3D Program",
+        WS_OVERLAPPEDWINDOW,
+        300, 300,
+        640, 480,
+        NULL,
+        NULL,
+        hInstance,
+        NULL);
+
+    ShowWindow(hWnd, nCmdShow);
+
+    // Compile Shaders
+    CompileShaders();
+
+    // set up and initialize Direct3D
+    InitD3D(hWnd);
+
+    // enter the main loop:
 
     MSG msg;
 
-    // Main message loop:
-    while (GetMessage(&msg, nullptr, 0, 0))
+    while (TRUE)
     {
-        if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
+        if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
         {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
+
+            if (msg.message == WM_QUIT)
+                break;
         }
+
+        RenderFrame();
     }
 
-    return (int) msg.wParam;
+    // clean up DirectX and COM
+    CleanD3D();
+
+    return msg.wParam;
 }
 
+// Assume pVS and pPS are already declared as global variables or class members
+ID3D11VertexShader* pVS = nullptr;
+ID3D11PixelShader* pPS = nullptr;
+ID3DBlob* pVSBlob = nullptr; // Vertex shader bytecode blob
+ID3DBlob* pPSBlob = nullptr; // Pixel shader bytecode blob, if needed
 
-
-//
-//  FUNCTION: MyRegisterClass()
-//
-//  PURPOSE: Registers the window class.
-//
-ATOM MyRegisterClass(HINSTANCE hInstance)
+void CompileShaders()
 {
-    WNDCLASSEXW wcex;
+    ID3DBlob* errorBlob = nullptr;
 
-    wcex.cbSize = sizeof(WNDCLASSEX);
+    // Compile the vertex shader
+    HRESULT hr = D3DCompileFromFile(L"shaders.hlsl", nullptr, nullptr, "VShader", "vs_4_0",
+        D3DCOMPILE_ENABLE_STRICTNESS, 0, &pVSBlob, &errorBlob); // Use pVSBlob directly
+    if (FAILED(hr))
+    {
+        if (errorBlob)
+        {
+            OutputDebugStringA(reinterpret_cast<const char*>(errorBlob->GetBufferPointer()));
+            errorBlob->Release();
+        }
+        // Handle the error, e.g., log or display an error message
+        return;
+    }
 
-    wcex.style          = CS_HREDRAW | CS_VREDRAW;
-    wcex.lpfnWndProc    = WndProc;
-    wcex.cbClsExtra     = 0;
-    wcex.cbWndExtra     = 0;
-    wcex.hInstance      = hInstance;
-    wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_DIRECT11TEST));
-    wcex.hCursor        = LoadCursor(nullptr, IDC_ARROW);
-    wcex.hbrBackground  = (HBRUSH)(COLOR_WINDOW+1);
-    wcex.lpszMenuName   = MAKEINTRESOURCEW(IDC_DIRECT11TEST);
-    wcex.lpszClassName  = szWindowClass;
-    wcex.hIconSm        = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
+    hr = dev->CreateVertexShader(pVSBlob->GetBufferPointer(), pVSBlob->GetBufferSize(), nullptr, &pVS);
+    if (FAILED(hr))
+    {
+        pVSBlob->Release(); // Release only if the shader creation fails
+        pVSBlob = nullptr; // Ensure the pointer is null after releasing
+        // Handle the error
+        return;
+    }
 
-    return RegisterClassExW(&wcex);
+    // Compile the pixel shader
+    hr = D3DCompileFromFile(L"shaders.hlsl", nullptr, nullptr, "PShader", "ps_4_0",
+        D3DCOMPILE_ENABLE_STRICTNESS, 0, &pPSBlob, &errorBlob); // Use pPSBlob directly
+    if (FAILED(hr))
+    {
+        if (errorBlob)
+        {
+            OutputDebugStringA(reinterpret_cast<const char*>(errorBlob->GetBufferPointer()));
+            errorBlob->Release();
+        }
+        if (pVSBlob) // Only release pVSBlob if pixel shader compilation fails
+        {
+            pVSBlob->Release();
+            pVSBlob = nullptr;
+        }
+        // Handle the error
+        return;
+    }
+
+    hr = dev->CreatePixelShader(pPSBlob->GetBufferPointer(), pPSBlob->GetBufferSize(), nullptr, &pPS);
+    if (FAILED(hr))
+    {
+        pPSBlob->Release(); // Release only if the shader creation fails
+        pPSBlob = nullptr; // Ensure the pointer is null after releasing
+        if (pVSBlob) // Additionally, clean up pVSBlob if not done already
+        {
+            pVSBlob->Release();
+            pVSBlob = nullptr;
+        }
+        // Handle the error
+        return;
+    }
+
+    // No need to set shader objects here if you plan to do it later, 
+    // but it's okay to leave it if you want to set them right away
+    //devcon->VSSetShader(pVS, nullptr, 0);
+    //devcon->PSSetShader(pPS, nullptr, 0);
 }
+// this function initializes and prepares Direct3D for use
+void InitD3D(HWND hWnd)
+{
+    HRESULT result;
+    // create a struct to hold information about the swap chain
+    DXGI_SWAP_CHAIN_DESC scd;
 
-// This creates a hardcoded vertex buffer
-ID3D11Buffer* CreateVertexBuffer(ID3D11Device &graphicsDevice) {
-    ID3D11Buffer* pVertexBuffer;
+    // clear out the struct for use
+    ZeroMemory(&scd, sizeof(DXGI_SWAP_CHAIN_DESC));
 
-    // Define the data-type that
-    // describes a vertex.
-    struct SimpleVertexCombined
-    {
-        DirectX::XMFLOAT3 Position;
-        DirectX::XMFLOAT3 Color;
-    };
+    // fill the swap chain description struct
+    scd.BufferCount = 1;                                    // one back buffer
+    scd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;     // use 32-bit color
+    scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;      // how swap chain is to be used
+    scd.OutputWindow = hWnd;                                // the window to be used
+    scd.SampleDesc.Count = 4;                               // how many multisamples
+    scd.Windowed = TRUE;                                    // windowed/full-screen mode
 
-    // Supply the actual vertex data.
-    SimpleVertexCombined verticesCombo[] =
-    {
-        DirectX::XMFLOAT3(0.0f, 0.5f, 0.5f),
-        DirectX::XMFLOAT3(0.0f, 0.0f, 0.5f),
-        DirectX::XMFLOAT3(0.5f, -0.5f, 0.5f),
-        DirectX::XMFLOAT3(0.5f, 0.0f, 0.0f),
-        DirectX::XMFLOAT3(-0.5f, -0.5f, 0.5f),
-        DirectX::XMFLOAT3(0.0f, 0.5f, 0.0f),
-    };
+    // create a device, device context and swap chain using the information in the scd struct
+    D3D11CreateDeviceAndSwapChain(NULL,
+        D3D_DRIVER_TYPE_HARDWARE,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        D3D11_SDK_VERSION,
+        &scd,
+        &swapchain,
+        &dev,
+        NULL,
+        &devcon);
 
-    // Fill in a buffer description.
-    D3D11_BUFFER_DESC bufferDesc;
-    bufferDesc.Usage = D3D11_USAGE_DEFAULT;
-    bufferDesc.ByteWidth = sizeof(SimpleVertexCombined) * 3;
-    bufferDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    bufferDesc.CPUAccessFlags = 0;
-    bufferDesc.MiscFlags = 0;
+    // get the address of the back buffer
+    ID3D11Texture2D* pBackBuffer;
+    result = swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
 
-    // Fill in the subresource data.
-    D3D11_SUBRESOURCE_DATA InitData;
-    InitData.pSysMem = verticesCombo;
-    InitData.SysMemPitch = 0;
-    InitData.SysMemSlicePitch = 0;
-
-    // Create the vertex buffer.
-    HRESULT hr = graphicsDevice.CreateBuffer(&bufferDesc, &InitData, &pVertexBuffer);
-
-    if (hr != S_OK) {
-        LOGERROR("Failed to create vertex buffer!");
+    if (FAILED(result)) {
+        LOGERROR("Failed to get back buffer from swap chain.");
         exit(1);
     }
-    return pVertexBuffer;
+
+    // use the back buffer address to create the render target
+    dev->CreateRenderTargetView(pBackBuffer, NULL, &backbuffer);
+    pBackBuffer->Release();
+
+    // set the render target as the back buffer
+    devcon->OMSetRenderTargets(1, &backbuffer, NULL);
+
+    // Set the viewport
+    D3D11_VIEWPORT viewport;
+    ZeroMemory(&viewport, sizeof(D3D11_VIEWPORT));
+
+    viewport.TopLeftX = 0;
+    viewport.TopLeftY = 0;
+    viewport.Width = 800;
+    viewport.Height = 600;
+
+    devcon->RSSetViewports(1, &viewport);
+
+    // Create a triangular pyramid
+    TriangularPyramid pyramid = TriangularPyramid();
+
+    std::vector<Vertex> vertices = pyramid.vertices;
+
+    // Create the vertex buffer
+    ID3D11Buffer* vertexBuffer;
+
+    // Create the buffer description
+    D3D11_BUFFER_DESC bd;
+    bd.Usage = D3D11_USAGE_DEFAULT;
+    bd.ByteWidth = sizeof(Vertex) * vertices.size();
+    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    bd.CPUAccessFlags = 0;
+    bd.MiscFlags = 0;
+
+    // Create the subresource data
+    D3D11_SUBRESOURCE_DATA initData;
+    initData.pSysMem = &vertices[0];
+    initData.SysMemPitch = 0;
+    initData.SysMemSlicePitch = 0;
+
+    dev->CreateBuffer(&bd, &initData, &vertexBuffer);
+
+    UINT stride = sizeof(Vertex);
+    UINT offset = 0;
+    devcon->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+
+    // Create and bind the index buffer
+    ID3D11Buffer* indexBuffer = nullptr;
+    D3D11_BUFFER_DESC ibd = {};
+    ibd.Usage = D3D11_USAGE_DEFAULT;
+    ibd.ByteWidth = sizeof(uint16_t) * pyramid.indices.size(); // Size of the index buffer
+    ibd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+    ibd.CPUAccessFlags = 0;
+
+    D3D11_SUBRESOURCE_DATA iInitData = {};
+    iInitData.pSysMem = pyramid.indices.data();
+
+    dev->CreateBuffer(&ibd, &iInitData, &indexBuffer);
+
+    // Bind the index buffer
+    devcon->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R16_UINT, 0);
+
+    D3D11_INPUT_ELEMENT_DESC layout[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(Vertex, position),
+          D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Vertex, color),
+          D3D11_INPUT_PER_VERTEX_DATA, 0 }
+    };
+    UINT numElements = ARRAYSIZE(layout);
+
+    ID3D11InputLayout* pVertexLayout;
+    dev->CreateInputLayout(
+        layout, 
+        numElements, 
+        pVSBlob->GetBufferPointer(),
+        pVSBlob->GetBufferSize(), 
+        &pVertexLayout
+    );
+
+    devcon->IASetInputLayout(pVertexLayout);
+
+
 }
 
-//
-//   FUNCTION: InitInstance(HINSTANCE, int)
-//
-//   PURPOSE: Saves instance handle and creates main window
-//
-//   COMMENTS:
-//
-//        In this function, we save the instance handle in a global variable and
-//        create and display the main program window.
-//
-BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
+// this is the function used to render a single frame
+void RenderFrame(void)
 {
-   hInst = hInstance; // Store instance handle in our global variable
+    // Define clear color as an XMVECTORF32 (r, g, b, a)
+    DirectX::XMVECTORF32 clearColor = { 0.0f, 0.0f, 0.0f, 1.0f };
 
-   HWND hWnd = CreateWindowW(
-       szWindowClass, 
-       szTitle, 
-       WS_OVERLAPPEDWINDOW,
-       CW_USEDEFAULT, 
-       0, 
-       CW_USEDEFAULT, 
-       0, 
-       nullptr, 
-       nullptr, 
-       hInstance, 
-       nullptr
-   );
+    // Clear the back buffer to the defined color
+    devcon->ClearRenderTargetView(backbuffer, clearColor);
 
-   if (!hWnd)
-   {
-      return FALSE;
-   }
+    // Additional rendering commands would go here
 
-   ShowWindow(hWnd, nCmdShow);
-   UpdateWindow(hWnd);
-
-   IDXGIAdapter* myAdapter = findGraphicsAdapter();
-
-   if (myAdapter == nullptr) {
-       LOGERROR("Failed to find RTX graphics adapter!");
-       exit(1);
-   }
-
-   ID3D11Device** ppGraphicsDevice = nullptr;
-   ID3D11DeviceContext** ppDeviceContext = nullptr;
-
-   DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
-   ZeroMemory(&swapChainDesc, sizeof(DXGI_SWAP_CHAIN_DESC));
-   // Initialize swapChainDesc with appropriate values
-   swapChainDesc.BufferCount = 2;
-   swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-   swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-   swapChainDesc.OutputWindow = hWnd;
-   swapChainDesc.SampleDesc.Count = 1;
-   swapChainDesc.Windowed = TRUE;
-
-   IDXGISwapChain* pSwapChain = nullptr;
-   ID3D11Device* pGraphicsDevice = nullptr;
-   ID3D11DeviceContext* pDeviceContext = nullptr;
-
-   // init device and swap chain
-   HRESULT result = D3D11CreateDeviceAndSwapChain(
-       nullptr,
-       D3D_DRIVER_TYPE_HARDWARE,
-       NULL,
-       NULL,                            // You can put flags here to enable debug if necessary: https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ne-d3d11-d3d11_create_device_flag
-       nullptr,                         // pFeatureLevels
-       0,                               // FeatureLevels - number of levels in pFeatureLevels (if that is NULL then the default has 6)
-       D3D11_SDK_VERSION,
-       &swapChainDesc,                  // pSwapChainDesc,
-       &pSwapChain,                     // OUT - gives us the address of the swap chain
-       &pGraphicsDevice,                // OUT - gives us the address of the graphics device
-       nullptr,
-       &pDeviceContext
-   );
-
-   if (result != S_OK) {
-       LOGERROR("Failed to create swap chain!!");
-   }
-
-   LOGINFO("Swap chain created successfully!");
-
-   ID3D11Texture2D* pBackBuffer;
-   // Get a pointer to the back buffer
-   result = pSwapChain->GetBuffer(
-       0, 
-       __uuidof(ID3D11Texture2D),
-       (LPVOID*)&pBackBuffer
-   );
-
-   ID3D11RenderTargetView* pRenderTargetView;
-   // Create a render-target view
-   pGraphicsDevice->CreateRenderTargetView(
-       pBackBuffer, 
-       NULL,
-       &pRenderTargetView
-   );
-
-   // Bind the view
-   pDeviceContext->OMSetRenderTargets(1, &pRenderTargetView, NULL);
-
-   // Setup the viewport
-   D3D11_VIEWPORT vp;
-   vp.Width = 640;
-   vp.Height = 480;
-   vp.MinDepth = 0.0f;
-   vp.MaxDepth = 1.0f;
-   vp.TopLeftX = 0;
-   vp.TopLeftY = 0;
-   pDeviceContext->RSSetViewports(1, &vp);
-
-   return TRUE;
+    // Present the back buffer to the front buffer (the screen)
+    swapchain->Present(0, 0);
 }
 
-//
-//  FUNCTION: WndProc(HWND, UINT, WPARAM, LPARAM)
-//
-//  PURPOSE: Processes messages for the main window.
-//
-//  WM_COMMAND  - process the application menu
-//  WM_PAINT    - Paint the main window
-//  WM_DESTROY  - post a quit message and return
-//
-//
-LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+// this is the function that cleans up Direct3D and COM
+void CleanD3D(void)
+{
+    swapchain->Release();
+    dev->Release();
+    devcon->Release();
+}
+
+// this is the main message handler for the program
+LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
-    case WM_COMMAND:
-        {
-            int wmId = LOWORD(wParam);
-            // Parse the menu selections:
-            switch (wmId)
-            {
-            case IDM_ABOUT:
-                DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
-                break;
-            case IDM_EXIT:
-                DestroyWindow(hWnd);
-                break;
-            default:
-                return DefWindowProc(hWnd, message, wParam, lParam);
-            }
-        }
-        break;
-    case WM_PAINT:
-        {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hWnd, &ps);
-            // TODO: Add any drawing code that uses hdc here...
-            EndPaint(hWnd, &ps);
-        }
-        break;
     case WM_DESTROY:
-        PostQuitMessage(0);
-        break;
-    default:
-        return DefWindowProc(hWnd, message, wParam, lParam);
-    }
-    return 0;
-}
-
-// Message handler for about box.
-INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
-{
-    UNREFERENCED_PARAMETER(lParam);
-    switch (message)
     {
-    case WM_INITDIALOG:
-        return (INT_PTR)TRUE;
-
-    case WM_COMMAND:
-        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
-        {
-            EndDialog(hDlg, LOWORD(wParam));
-            return (INT_PTR)TRUE;
-        }
-        break;
+        PostQuitMessage(0);
+        return 0;
+    } break;
     }
-    return (INT_PTR)FALSE;
+
+    return DefWindowProc(hWnd, message, wParam, lParam);
 }
